@@ -3,8 +3,6 @@ Core plagiarism detection model.
 - Level 1 & 2 : HOG-based visual (UDP) similarity
 - Level 3     : Semantic text similarity via sentence-transformers
 - Level 4     : Paraphrasing detection (also sentence-transformers, lower threshold)
-
-No paid APIs required — 100% free.
 """
 
 import os
@@ -22,9 +20,14 @@ def load_model():
 
 
 def scan_for_plagiarism(submission_folder: str, use_level4: bool):
+    # SAFETY CHECK: Ensure the folder exists before listing files
+    if not os.path.exists(submission_folder):
+        st.error(f"❌ Error: The directory {submission_folder} was not found.")
+        return
+
     model = load_model()
 
-    # Filter to image files only
+    # Filter to image files only to prevent processing system files like .DS_Store
     all_files = os.listdir(submission_folder)
     submissions = [
         f for f in all_files
@@ -37,121 +40,84 @@ def scan_for_plagiarism(submission_folder: str, use_level4: bool):
 
     st.info(f"Found {len(submissions)} submission(s). Running detection…")
 
-    # ── Pre-extract all text ──────────────────────────────────────────────────
-    with st.spinner("Extracting text from all submissions (OCR)…"):
+    # ── Pre-extract all text and visual patterns ──────────────────────────────
+    with st.spinner("Processing submissions (OCR & Visual Analysis)…"):
         text_list = []
         emb_list = []
+        udp_list = []
+        
         for fname in submissions:
             path = os.path.join(submission_folder, fname)
+            
+            # Extract text via OCR
             text = extract_text(path)
             text_list.append(text)
-            emb = model.encode(text) if text else None
+            
+            # Generate Semantic Embeddings
+            if text.strip():
+                emb = model.encode(text, convert_to_tensor=True)
+            else:
+                emb = None
             emb_list.append(emb)
+            
+            # Generate Visual Digital Pattern (UDP)
+            try:
+                udp = generate_digital_pattern(path)
+                udp_list.append(udp)
+            except Exception:
+                udp_list.append(None)
 
-    # ── Pairwise comparison ───────────────────────────────────────────────────
-    cp_list, pp_list, level4_list = [], [], []
-    excluded = set()
+    # ── Comparison Logic ──────────────────────────────────────────────────────
+    cp_list = [] # Complete Plagiarism
+    pp_list = [] # Potential Plagiarism
+    level4_list = []
 
-    progress = st.progress(0)
-    total_pairs = len(submissions) * (len(submissions) - 1) // 2
-    done = 0
-
-    with st.expander("📋 Live Processing Log", expanded=True):
+    with st.spinner("Comparing pairs..."):
         for i in range(len(submissions)):
-            if submissions[i] in excluded:
-                continue
-
             for j in range(i + 1, len(submissions)):
-                done += 1
-                progress.progress(done / total_pairs)
-
-                name1 = os.path.splitext(submissions[i])[0]
-                name2 = os.path.splitext(submissions[j])[0]
-                path1 = os.path.join(submission_folder, submissions[i])
-                path2 = os.path.join(submission_folder, submissions[j])
-
-                # ── Level 1 / 2 : UDP visual similarity ──────────────────────
-                pat1 = generate_digital_pattern(path1)
-                pat2 = generate_digital_pattern(path2)
-                min_len = min(len(pat1), len(pat2))
-                udp_sim = compare_patterns(pat1[:min_len], pat2[:min_len])
-
-                if udp_sim > 0.95:
-                    st.error(f"🔴 Level 1 – Complete Plagiarism: **{name1}** ↔ **{name2}**  (UDP={udp_sim*100:.1f}%)")
-                    cp_list.append((name1, name2))
-                    excluded.add(submissions[j])
-                    continue
-
-                # ── Level 2 / 3 : Semantic text similarity ───────────────────
-                e1, e2 = emb_list[i], emb_list[j]
-
-                if e1 is not None and e2 is not None:
-                    cos_sim = float(util.cos_sim(e1, e2).item())
-                else:
-                    cos_sim = 0.0
-
-                if udp_sim > 0.55:
-                    if cos_sim >= 0.85:
-                        st.error(
-                            f"🔴 Level 2 – Complete Plagiarism: **{name1}** ↔ **{name2}**  "
-                            f"(UDP={udp_sim*100:.1f}%, Text={cos_sim*100:.1f}%)"
-                        )
-                        cp_list.append((name1, name2))
-                        excluded.add(submissions[j])
-                    else:
-                        st.warning(
-                            f"🟡 Level 2 – Potential Plagiarism: **{name1}** ↔ **{name2}**  "
-                            f"(UDP={udp_sim*100:.1f}%, Text={cos_sim*100:.1f}%)"
-                        )
-                        pp_list.append((name1, name2))
-                else:
-                    if cos_sim >= 0.85:
-                        st.error(f"🔴 Level 3 – Complete Plagiarism: **{name1}** ↔ **{name2}**  (Text={cos_sim*100:.1f}%)")
-                        cp_list.append((name1, name2))
-                    elif cos_sim >= 0.70:
-                        st.warning(f"🟡 Level 3 – Potential Plagiarism: **{name1}** ↔ **{name2}**  (Text={cos_sim*100:.1f}%)")
-                        pp_list.append((name1, name2))
-                    else:
-                        st.success(f"✅ No significant similarity: **{name1}** ↔ **{name2}**  (Text={cos_sim*100:.1f}%)")
-
-    # ── Level 4 : Paraphrasing (lower threshold, slower) ─────────────────────
-    if use_level4:
-        st.subheader("Level 4 – Paraphrasing Detection")
-        with st.spinner("Running paraphrasing check…"):
-            for i in range(len(submissions)):
-                if submissions[i] in excluded:
-                    continue
-                for j in range(i + 1, len(submissions)):
-                    pair = (os.path.splitext(submissions[i])[0], os.path.splitext(submissions[j])[0])
-                    if pair in cp_list or pair in pp_list:
-                        continue  # Already flagged
-                    e1, e2 = emb_list[i], emb_list[j]
-                    if e1 is not None and e2 is not None:
-                        cos_sim = float(util.cos_sim(e1, e2).item())
-                        if cos_sim >= 0.55:
-                            st.warning(f"🟠 Level 4 – Possible Paraphrasing: **{pair[0]}** ↔ **{pair[1]}**  (Text={cos_sim*100:.1f}%)")
-                            level4_list.append(pair)
+                p1_name = os.path.splitext(submissions[i])[0]
+                p2_name = os.path.splitext(submissions[j])[0]
+                
+                # Visual Check (UDP)
+                visual_sim = 0.0
+                if udp_list[i] is not None and udp_list[j] is not None:
+                    visual_sim = compare_patterns(udp_list[i], udp_list[j])
+                
+                # Text Check
+                text_sim = 0.0
+                if emb_list[i] is not None and emb_list[j] is not None:
+                    text_sim = float(util.cos_sim(emb_list[i], emb_list[j]).item())
+                
+                # Level 1: Visual Match (>95%)
+                if visual_sim >= 0.95:
+                    st.error(f"🔴 Level 1 – Complete Plagiarism: **{p1_name}** ↔ **{p2_name}** (Visual={visual_sim*100:.1f}%)")
+                    cp_list.append((p1_name, p2_name))
+                
+                # Level 2: Mixed Match
+                elif visual_sim >= 0.55 and text_sim >= 0.85:
+                    st.error(f"🔴 Level 2 – Complete Plagiarism: **{p1_name}** ↔ **{p2_name}** (Mixed similarity)")
+                    cp_list.append((p1_name, p2_name))
+                
+                # Level 3: Text Match (>70%)
+                elif text_sim >= 0.70:
+                    st.warning(f"🟡 Level 3 – Potential Plagiarism: **{p1_name}** ↔ **{p2_name}** (Text={text_sim*100:.1f}%)")
+                    pp_list.append((p1_name, p2_name))
+                
+                # Level 4: Paraphrasing (Optional)
+                elif use_level4 and text_sim >= 0.55:
+                    st.info(f"🟠 Level 4 – Paraphrasing Suspected: **{p1_name}** ↔ **{p2_name}** (Text={text_sim*100:.1f}%)")
+                    level4_list.append((p1_name, p2_name))
 
     # ── Summary ───────────────────────────────────────────────────────────────
     st.divider()
     st.subheader("📊 Summary")
     col1, col2, col3 = st.columns(3)
-    col1.metric("🔴 Complete Plagiarism", len(cp_list))
-    col2.metric("🟡 Potential Plagiarism", len(pp_list))
+    col1.metric("🔴 Complete", len(cp_list))
+    col2.metric("🟡 Potential", len(pp_list))
     if use_level4:
-        col3.metric("🟠 Paraphrasing Suspected", len(level4_list))
+        col3.metric("🟠 Paraphrasing", len(level4_list))
 
     if cp_list:
-        with st.expander("🔴 Complete Plagiarism Pairs"):
+        with st.expander("🔴 View Complete Plagiarism Pairs"):
             for a, b in cp_list:
-                st.write(f"• {a}  ↔  {b}")
-
-    if pp_list:
-        with st.expander("🟡 Potential Plagiarism Pairs"):
-            for a, b in pp_list:
-                st.write(f"• {a}  ↔  {b}")
-
-    if use_level4 and level4_list:
-        with st.expander("🟠 Paraphrasing Suspected Pairs"):
-            for a, b in level4_list:
-                st.write(f"• {a}  ↔  {b}")
+                st.write(f"• {a} ↔ {b}")

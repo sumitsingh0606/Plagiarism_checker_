@@ -22,19 +22,27 @@ def main():
             st.error("Uploaded file is not a valid ZIP file.")
             return
 
-        folder_name, _ = os.path.splitext(uploaded_file.name)
+        # Fixed extraction destination in the /tmp directory
         extraction_dest = "/tmp/plagiarism_uploads"
-        destination_folder = os.path.join(extraction_dest, folder_name)
+        
+        # Clean previous run to avoid mixing data
+        if os.path.exists(extraction_dest):
+            shutil.rmtree(extraction_dest)
+        os.makedirs(extraction_dest, exist_ok=True)
 
-        # Clean previous run
-        if os.path.exists(destination_folder):
-            shutil.rmtree(destination_folder)
-
+        # Extract the ZIP
         with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
-            os.makedirs(extraction_dest, exist_ok=True)
             zip_ref.extractall(extraction_dest)
 
+        # Handle nested folders (e.g., if the user zipped a folder instead of files)
+        content = os.listdir(extraction_dest)
+        if len(content) == 1 and os.path.isdir(os.path.join(extraction_dest, content[0])):
+            destination_folder = os.path.join(extraction_dest, content[0])
+        else:
+            destination_folder = extraction_dest
+
         if st.button("🔍 Detect Plagiarism"):
+            # Trigger the detection model
             scan_for_plagiarism(destination_folder, use_level4)
 
 if __name__ == "__main__":
